@@ -1,18 +1,12 @@
 name: Signed custom Breeze server release
 
-# Manual, reviewed release. Uses a non-v* tag so the inherited upstream
-# full release pipeline cannot mistakenly start signing agent binaries.
+# Tag-triggered release from the reviewed custom branch. The custom-v*
+# namespace deliberately does not match upstream's v* full/agent release jobs.
+# Tag creation must be protected with a GitHub tag ruleset.
 on:
-  workflow_dispatch:
-    inputs:
-      upstream_release:
-        description: 'Exact official release (example: v0.129.0)'
-        required: true
-        type: string
-      custom_revision:
-        description: 'Positive integer revision (example: 1)'
-        required: true
-        type: string
+  push:
+    tags:
+      - 'custom-v*'
 
 permissions: {}
 concurrency:
@@ -22,14 +16,14 @@ concurrency:
 jobs:
   publish:
     name: Build, sign and publish server-only custom release
-    if: github.ref_name == 'custom' && github.repository == 'robert-audat/breeze'
+    if: startsWith(github.ref, 'refs/tags/custom-v') && github.event.deleted == false && github.repository == 'robert-audat/breeze'
     runs-on: ubuntu-latest
     environment: custom-release-signing
     permissions:
       contents: write
       packages: write
     steps:
-      - name: Checkout custom branch
+      - name: Checkout exact tagged commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -50,25 +44,40 @@ jobs:
       - name: Validate release identity and ancestry
         id: naming
         env:
-          UPSTREAM: ${{ inputs.upstream_release }}
-          REVISION: ${{ inputs.custom_revision }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "$UPSTREAM" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
-          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || exit 2
+          # The tag determines both identities. Never accept a mutable manual input.
+          if [[ ! "$RELEASE_TAG" =~ ^custom-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-custom\.([1-9][0-9]*)$ ]]; then
+            echo "::error::Expected custom-vX.Y.Z-custom.POSITIVE_REVISION; got $RELEASE_TAG"
+            exit 2
+          fi
+          UPSTREAM="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          CUSTOM_RELEASE="${RELEASE_TAG#custom-}"
+
+          # A tag at an arbitrary commit must never obtain access to the
+          # release signing environment. Only the current reviewed custom
+          # branch head can be published.
+          git fetch --no-tags origin "+refs/heads/custom:refs/remotes/origin/custom"
+          custom_head="$(git rev-parse 'refs/remotes/origin/custom^{commit}')"
+          tagged_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if [[ "$tagged_commit" != "$custom_head" ]]; then
+            echo "::error::Tag commit $tagged_commit is not the current custom branch head $custom_head."
+            exit 1
+          fi
+
           git fetch --no-tags https://github.com/LanternOps/breeze.git "refs/tags/${UPSTREAM}:refs/tags/${UPSTREAM}"
           git fetch --no-tags https://github.com/LanternOps/breeze.git \
             main:refs/remotes/breeze-upstream/main
           upstream_sha="$(git rev-parse "${UPSTREAM}^{commit}")"
-          branch_base="$(git merge-base "$GITHUB_SHA" refs/remotes/breeze-upstream/main)"
+          branch_base="$(git merge-base "$tagged_commit" refs/remotes/breeze-upstream/main)"
           [[ "$branch_base" == "$upstream_sha" ]] || {
             echo "::error::The custom branch diverged from official main at $branch_base, not at the requested release $upstream_sha. Refusing to mislabel post-release upstream commits as ${UPSTREAM}."
             exit 1
           }
-          CUSTOM_RELEASE="${UPSTREAM}-custom.${REVISION}"
           echo "upstream=${UPSTREAM}" >> "$GITHUB_OUTPUT"
           echo "custom=${CUSTOM_RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=custom-${CUSTOM_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "base_version=${UPSTREAM#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download and verify original release inventory
@@ -172,5 +181,5 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" release-assets/release-artifact-manifest.json \
             release-assets/release-artifact-manifest.json.ed25519 \
-            --target "$GITHUB_SHA" --title "$CUSTOM_RELEASE" \
+            --verify-tag --latest=false --title "$CUSTOM_RELEASE" \
             --notes "Custom server images built from $GITHUB_SHA, based on official $UPSTREAM. Original signed binaries and M365 executor images retained."
