@@ -58,46 +58,79 @@ Create the GitHub Actions **Environment** `custom-release-signing` in
 - Variable `CUSTOM_RELEASE_PUBLIC_KEY_B64`: the base64-encoded raw public key
   printed above.
 
-Restrict the environment to the protected `custom` branch, require review where
-available, protect `custom` with PR/review/check requirements, and avoid giving
-untrusted code access to the signing environment. Do not commit private keys.
+The workflow runs on a `custom-v*` **tag**, not on a branch event. Under the
+environment's deployment branch/tag restrictions, select **Selected branches and
+tags**, then add an allowed **tag** pattern `custom-v*` (not just branch
+`custom`). Add required reviewers if available. A separate GitHub **tag
+ruleset** must protect creation and updating of `custom-v*` tags; an
+environment selector alone does not guarantee the tag comes from reviewed code.
+Protect `custom` with PR, review, and check requirements. Only create tags
+from reviewed `custom` commits, and never expose signing secrets to
+untrusted PR workflows. Do not commit private keys.
 
 Make sure the workflow's `GITHUB_TOKEN` has `packages:write` and
 `contents:write` and that the resulting GHCR image packages are accessible to
 your IONOS server (public packages or authenticated Docker registry pull).
 
-## Publish a release
+## Publish a release (tag-triggered)
 
-1. Base `custom` on the **exact official release tag**, apply your fork-only
-   changes, resolve conflicts and run upstream CI. The workflow checks that
-   `custom` diverged from upstream `main` at precisely the selected official
-   tag, so newer untagged upstream commits cannot be mislabeled as a release.
-   When upgrading, update this baseline deliberately. Do not reset your
-   production branch without preserving your own commits.
-2. On GitHub, run the `Signed custom Breeze server release` workflow from the
-   `custom` branch with `upstream_release=v0.129.0`, `custom_revision=1`.
-3. It downloads and verifies the official signed image manifest, builds
-   digest-pinned custom API and Web images, signs a custom seven-image inventory
-   using the environment key, self-verifies it, and publishes the GitHub Release
-   `custom-v0.129.0-custom.1`.
-4. Confirm the release assets are named `release-artifact-manifest.json` and
-   `release-artifact-manifest.json.ed25519`. Treat each revision as immutable;
-   use `custom.2` for any rebuild.
+The fork's **default branch stays `main`**. GitHub Actions starts this
+workflow when a new tag matching `custom-v*` is pushed. Because it is a
+tag-triggered workflow, its file can live in `custom` without changing the
+fork's default branch. Do not use the inherited `v*` release workflows.
+
+1. Base `custom` on the **exact official release tag**, apply fork-only
+   changes, resolve conflicts and run upstream CI. The workflow verifies that
+   `custom` diverged from upstream `main` at precisely the selected
+   upstream release tag. This prevents mislabeling newer development commits
+   as a past official release. Do not reset your deployment branch without
+   preserving your own commits.
+2. Ensure the custom branch is pushed and the signing environment has the
+   public key and private signing key configured.
+3. Create and push an annotated release tag pointing at the **current custom
+   branch head** (the validation job checks this).
+
+   ```bash
+   git fetch origin
+   git switch custom
+   git pull --ff-only origin custom
+   git tag -a custom-v0.129.0-custom.1 -m "Custom Breeze v0.129.0-custom.1"
+   git push origin refs/tags/custom-v0.129.0-custom.1
+   ```
+
+   Replace the version above with a **validated** official baseline and the
+   next unused custom revision; it is illustrative only. Avoid creating the
+   tag unless the ancestry check and repository checks can pass.
+4. The workflow first validates tag syntax, the exact tagged commit, the
+   selected upstream tag and local tests **without signing secrets**. Only
+   after validation succeeds does the publishing job access the
+   `custom-release-signing` environment. It then downloads and verifies the
+   official signed inventory, builds API and Web by immutable digests, signs
+   a custom seven-image manifest, verifies it and publishes a GitHub Release
+   under the same custom tag.
+5. Confirm the release assets are `release-artifact-manifest.json` and
+   `release-artifact-manifest.json.ed25519`. Treat revisions as immutable.
+   Never re-point an existing release tag. Use `custom.2` for a rebuild.
+
+If you need to test the workflow itself before the ancestry check can pass,
+test only local verification and CI; do not grant it production signing
+credentials or publish a misleading release tag.
 
 The Portal, binaries and M365 executor images remain official. The signed
-manifest records the exact custom commit SHA and hashes the official image
-inventory to bind both release identities. If needed later, the manifest
-builder also supports a separately built, verified custom Portal image.
+manifest records the custom commit SHA and hashes the official image inventory
+to bind both release identities. If needed later, the manifest builder can
+also support a separately built, verified custom Portal image.
 
 **Current fork caution (November 21, 2026):** upstream's latest published
-release is `v0.129.0`, while this fork's `custom` branch already contains
-newer upstream `main` commits. The workflow **must refuse** publishing a
-`v0.129.0-custom.1` build from that branch. Either rebuild your custom branch
-from the exact `v0.129.0` tag while preserving custom work, or move to the next
-official release after it is published and properly merged.
+release was `v0.129.0`, while this fork's `custom` branch already includes
+newer upstream commits. The release workflow **must refuse**
+`custom-v0.129.0-custom.1` from that branch. Establish the exact official
+release baseline before tagging; do not tag the current branch as 0.129.0.
 
-**Note:** This fork contains inherited `v*` release workflows. Do not publish
-custom tags starting with `v`. Use the workflow's `custom-v*` release tag.
+**Inherited workflows:** this fork also contains upstream `v*` release
+workflows. Keep the upstream release/promotion workflows disabled in the fork,
+and protect the `custom-v*` tag namespace. Maintain regular PR test and
+security workflows as appropriate.
 
 ## Fresh installation using a signed custom release
 
