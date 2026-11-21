@@ -2,9 +2,9 @@ name: CodeQL SAST
 
 on:
   push:
-    branches: [main]
+    branches: [custom]
   pull_request:
-    branches: [main]
+    branches: [custom]
     # Not a required check (`CI Success` is), so a docs-only PR can skip it
     # without starving the merge queue. See ci.yml for why CI itself cannot.
     paths-ignore:
