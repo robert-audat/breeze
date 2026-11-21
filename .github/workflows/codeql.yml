@@ -13,10 +13,8 @@ on:
       - docs/**
       - apps/docs/**
       - internal/**
-  schedule:
-    # Weekly re-scan of main picks up new queries shipped in the CodeQL
-    # bundle even when nothing landed that day.
-    - cron: '17 6 * * 1'
+  # No cron here: scheduled GitHub Actions workflows always run on default
+  # branch (main), not the custom distribution branch.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
