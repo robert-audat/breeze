@@ -5,6 +5,9 @@ umask 077
 
 REMOTE_BASE_OVERRIDE="${BREEZE_SETUP_REMOTE_BASE:-}"
 REMOTE_BASE="${REMOTE_BASE_OVERRIDE}"
+# These helpers ship with the fork's guided script, not the downloaded
+# upstream Compose template. Run from a clone of robert-audat/breeze.
+CUSTOM_RELEASE_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/custom-release"
 WORK_DIR="${BREEZE_SETUP_DIR:-$(pwd)}"
 ENV_FILE=""
 ENV_FILE_CREATED="false"
@@ -25,6 +28,11 @@ UPGRADE_MODE="false"
 UPGRADE_TARGET_VERSION=""
 ALLOW_DOWNGRADE="false"
 UPGRADE_STAGED_ENV=""
+# A custom revision names a signed server-only build; BREEZE_VERSION remains
+# the official upstream baseline for migrations, agent compatibility and UI.
+CUSTOM_RELEASE_TARGET=""
+OFFICIAL_IMAGE_LIST_FILE=""
+OFFICIAL_MANIFEST_SHA256=""
 # --allow-unverified-release: install a version setup cannot verify anyway (a
 # release older than SIGNED_IMAGE_INVENTORY_MIN_VERSION, or a tag that is not
 # an exact release), from its unverified image tags. Fresh installs only. See
@@ -101,8 +109,12 @@ Guided Breeze self-host setup.
 Usage:
   bash scripts/guided-setup.sh [options]
   bash scripts/guided-setup.sh --upgrade [VERSION] [-y] [--no-up]
+  bash scripts/guided-setup.sh --upgrade VERSION --custom-release VERSION-custom.N
 
 Options:
+  --custom-release TAG Signed custom server image revision (for example
+                       v0.130.0-custom.1). BREEZE_VERSION remains 0.130.0.
+                       Requires separately pinned custom Ed25519 public key.
   --upgrade [VERSION]  Upgrade an existing install to VERSION (default: the latest
                        published release). Verifies that release's signed image
                        inventory, backs up .env, rewrites BREEZE_VERSION and the
@@ -197,6 +209,13 @@ while [[ $# -gt 0 ]]; do
         shift
       fi
       ;;
+    --custom-release)
+      CUSTOM_RELEASE_TARGET="${2:-}"
+      [[ -n "${CUSTOM_RELEASE_TARGET}" && "${CUSTOM_RELEASE_TARGET}" != -* ]] || {
+        echo "--custom-release requires a version (vX.Y.Z-custom.N)." >&2; exit 2;
+      }
+      shift 2
+      ;;
     --allow-downgrade)
       ALLOW_DOWNGRADE="true"
       shift
@@ -240,6 +259,10 @@ if [[ "${ALLOW_DOWNGRADE}" == "true" && "${UPGRADE_MODE}" != "true" ]]; then
 fi
 if [[ "${ALLOW_UNVERIFIED_RELEASE}" == "true" && "${UPGRADE_MODE}" == "true" ]]; then
   echo "--allow-unverified-release does not apply to --upgrade: --upgrade only moves to a release whose images are covered by release signatures (${SIGNED_IMAGE_INVENTORY_MIN_VERSION} or later)." >&2
+  exit 2
+fi
+if [[ -n "${CUSTOM_RELEASE_TARGET}" && "${ALLOW_UNVERIFIED_RELEASE}" == "true" ]]; then
+  echo "Custom releases require both upstream and custom signed manifests; --allow-unverified-release is forbidden." >&2
   exit 2
 fi
 if [[ "${UPGRADE_MODE}" == "true" && ( "${INSTALL_SYSTEMD_ONLY}" == "true" || -n "${RENDER_SYSTEMD_DIR}" ) ]]; then
@@ -3626,6 +3649,13 @@ require_verifiable_release() {
 configure_release_image_refs() {
   if release_is_verifiable "${SELECTED_BREEZE_VERSION}"; then
     configure_signed_release_image_refs
+    if [[ -n "${CUSTOM_RELEASE_TARGET}" ]]; then
+      configure_custom_release_image_refs
+    elif [[ -n "$(get_env_value BREEZE_CUSTOM_RELEASE_VERSION)" ]]; then
+      fail "This install already has a custom release; pass --custom-release explicitly to avoid reverting to official images."
+    fi
+    # Always keep the *official* signed binaries pair, not the custom server
+    # manifest, for BINARY_SOURCE=local and agent artifact verification.
     commit_release_manifest_pair
     return
   fi
@@ -3687,11 +3717,104 @@ configure_signed_release_image_refs() {
     set_env_value "$variable" "$value"
   done < "$resolved"
 
+  if [[ -n "${CUSTOM_RELEASE_TARGET}" ]]; then
+    [[ "$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')" == "lanternops/breeze" ]] || \
+      fail "Custom releases must use LanternOps/breeze for the separately verified upstream baseline."
+    [[ -f "${CUSTOM_RELEASE_HELPER_DIR}/list-verified-images.sh" ]] || \
+      fail "Missing fork helper: ${CUSTOM_RELEASE_HELPER_DIR}/list-verified-images.sh"
+    OFFICIAL_IMAGE_LIST_FILE="$(mktemp)" || fail "Cannot stage verified official image list."
+    bash "${CUSTOM_RELEASE_HELPER_DIR}/list-verified-images.sh" "$manifest" > "$OFFICIAL_IMAGE_LIST_FILE" \
+      || fail "Failed to extract verified upstream image list."
+    OFFICIAL_MANIFEST_SHA256="$(file_sha256 "$manifest")"
+    [[ "${OFFICIAL_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]] || fail "Could not hash upstream signed image inventory."
+  fi
+
   hold_verified_release_manifest_pair "$manifest" "$signature" "$repo" "$key" "$base"
 
   rm -rf "$RELEASE_VERIFY_TMP"
   RELEASE_VERIFY_TMP=""
   log "Pinned API, Web, Portal, and binaries images to the verified signed release digests."
+}
+
+# Signed custom releases replace only server components, while the official
+# image inventory and binary manifest remain authoritative for all other images.
+configure_custom_release_image_refs() {
+  local upstream tag repo key pinned_repo pinned_key base manifest signature resolved custom_list
+  local metadata_upstream metadata_hash variable value
+
+  upstream="$(get_env_value BREEZE_VERSION)"
+  tag="${CUSTOM_RELEASE_TARGET}"
+  [[ "${tag}" == v* ]] || tag="v${tag}"
+  [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*$ &&
+     "${tag}" == "v${upstream}-custom."* ]] || \
+    fail "Custom release ${tag} must match the official v${upstream} baseline and use -custom.N (N >= 1)."
+  [[ -f "${OFFICIAL_IMAGE_LIST_FILE}" && "${OFFICIAL_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]] || \
+    fail "Missing independently verified official release inventory."
+
+  pinned_repo="$(get_env_value BREEZE_CUSTOM_RELEASE_REPOSITORY)"
+  pinned_key="$(get_env_value BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS)"
+  if [[ -n "$pinned_repo" && -n "${BREEZE_CUSTOM_RELEASE_REPOSITORY:-}" &&
+        "$pinned_repo" != "$BREEZE_CUSTOM_RELEASE_REPOSITORY" ]]; then
+    fail "Custom release repository differs from the pinned .env repository."
+  fi
+  if [[ -n "$pinned_key" && -n "${BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS:-}" &&
+        "$pinned_key" != "$BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS" ]]; then
+    fail "Custom release signing key differs from the pinned .env key."
+  fi
+  repo="${pinned_repo:-${BREEZE_CUSTOM_RELEASE_REPOSITORY:-robert-audat/breeze}}"
+  key="${pinned_key:-${BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS:-}}"
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ &&
+     "$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')" != "lanternops/breeze" ]] || \
+    fail "BREEZE_CUSTOM_RELEASE_REPOSITORY must name your fork, not upstream."
+  [[ -n "$key" ]] || fail "Set BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS to your pinned Ed25519 public key before custom install/upgrade."
+  [[ -f "${CUSTOM_RELEASE_HELPER_DIR}/verify-image-set.sh" ]] || \
+    fail "Missing fork helper: ${CUSTOM_RELEASE_HELPER_DIR}/verify-image-set.sh"
+
+  RELEASE_VERIFY_TMP="$(mktemp -d)" || fail "Cannot stage signed custom inventory."
+  manifest="${RELEASE_VERIFY_TMP}/release-artifact-manifest.json"
+  signature="${RELEASE_VERIFY_TMP}/release-artifact-manifest.json.ed25519"
+  resolved="${RELEASE_VERIFY_TMP}/custom-images.env"
+  custom_list="${RELEASE_VERIFY_TMP}/custom-images.tsv"
+  # Deliberately NOT the official v* tag; avoids triggering the fork's inherited
+  # full agent release workflow. The signed manifest's release field IS `tag`.
+  base="${BREEZE_CUSTOM_RELEASE_DOWNLOAD_BASE:-https://github.com/${repo}/releases/download/custom-${tag}}"
+  base="${base%/}"
+  log "Downloading signed custom image inventory for ${repo} ${tag}."
+  curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --max-filesize 1048576 \
+    "${base}/release-artifact-manifest.json" -o "$manifest" || \
+    fail "Could not download custom image inventory ${tag}."
+  curl -fsSL --connect-timeout 10 --max-time 30 --retry 2 --max-filesize 4096 \
+    "${base}/release-artifact-manifest.json.ed25519" -o "$signature" || \
+    fail "Could not download custom inventory signature ${tag}."
+  RELEASE_ARTIFACT_MANIFEST_PUBLIC_KEYS="$key" bash "$RELEASE_IMAGE_VERIFIER_FILE" \
+    --manifest "$manifest" --signature "$signature" \
+    --expected-repository "$repo" --expected-release "$tag" --emit-env "$resolved" || \
+    fail "Custom release signature or image inventory verification failed; .env was not switched."
+
+  metadata_upstream="$(manifest_top_level_string "$manifest" upstreamRelease)"
+  metadata_hash="$(manifest_top_level_string "$manifest" upstreamManifestSha256)"
+  [[ "$metadata_upstream" == "v${upstream}" && "$metadata_hash" == "$OFFICIAL_MANIFEST_SHA256" ]] || \
+    fail "Custom release is not cryptographically bound to the verified upstream release inventory."
+  bash "${CUSTOM_RELEASE_HELPER_DIR}/list-verified-images.sh" "$manifest" > "$custom_list" || \
+    fail "Could not extract verified custom image list."
+  bash "${CUSTOM_RELEASE_HELPER_DIR}/verify-image-set.sh" \
+    "$OFFICIAL_IMAGE_LIST_FILE" "$custom_list" "$repo" || \
+    fail "Custom release altered a protected upstream image or used an unauthorized image repository."
+
+  while IFS='=' read -r variable value; do
+    case "$variable" in
+      BREEZE_API_IMAGE_REF|BREEZE_WEB_IMAGE_REF|BREEZE_PORTAL_IMAGE_REF)
+        set_env_value "$variable" "$value" ;;
+      BREEZE_BINARIES_IMAGE_REF) ;;  # Always preserve official signed binaries
+      *) fail "Custom signed resolver returned unexpected variable $variable" ;;
+    esac
+  done < "$resolved"
+  set_env_value BREEZE_CUSTOM_RELEASE_VERSION "$tag"
+  set_env_value BREEZE_CUSTOM_RELEASE_REPOSITORY "$repo"
+  set_env_value BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS "$key"
+  rm -rf "$RELEASE_VERIFY_TMP"
+  RELEASE_VERIFY_TMP=""
+  log "Pinned verified custom server images ${tag} on top of official Breeze v${upstream}."
 }
 
 # --- Release manifest pair for the binaries volume (#11870) -------------------
@@ -5087,6 +5210,9 @@ stage_upgraded_env() {
   configure_release_manifest_trust_root
   set_env_value "BREEZE_VERSION" "${target}"
   configure_signed_release_image_refs
+  if [[ -n "${CUSTOM_RELEASE_TARGET}" ]]; then
+    configure_custom_release_image_refs
+  fi
   ENV_FILE="${real_env}"
 
   backup_file "${ENV_FILE}"
@@ -5129,6 +5255,9 @@ run_upgrade() {
   target="$(resolve_upgrade_target_version)"
   is_exact_release_version "${target}" \
     || fail "Upgrade target '${target}' is not an exact release version (for example 0.116.0)."
+  if [[ -z "${CUSTOM_RELEASE_TARGET}" && -n "$(get_env_value BREEZE_CUSTOM_RELEASE_VERSION)" ]]; then
+    fail "Custom release detected. Pass --custom-release v${target}-custom.N explicitly; refusing to silently revert to official images."
+  fi
   release_has_signed_image_inventory "${target}" \
     || fail "--upgrade only targets releases with a signed image inventory (${SIGNED_IMAGE_INVENTORY_MIN_VERSION} or later); v${target} has none. Release signatures only cover the server container images from ${SIGNED_IMAGE_INVENTORY_MIN_VERSION} on, and --upgrade never pulls an image it cannot verify."
 
@@ -5158,7 +5287,10 @@ run_upgrade() {
   stage_upgraded_env "${target}"
 
   subsection "Updated ${ENV_FILE}"
-  log "BREEZE_VERSION: ${current} -> ${target}"
+  log "BREEZE_VERSION (official): ${current} -> ${target}"
+  if [[ -n "${CUSTOM_RELEASE_TARGET}" ]]; then
+    log "BREEZE_CUSTOM_RELEASE_VERSION: $(get_env_value BREEZE_CUSTOM_RELEASE_VERSION)"
+  fi
   local i
   for i in "${!UPGRADE_IMAGE_REF_KEYS[@]}"; do
     key="${UPGRADE_IMAGE_REF_KEYS[i]}"
@@ -5210,6 +5342,7 @@ on_exit() {
   [[ -n "${COMPOSE_FILE:-}" ]] && rm -f "${COMPOSE_FILE}".tmp.* 2>/dev/null
   [[ -n "${PROXY_GUIDE_FILE:-}" ]] && rm -f "${PROXY_GUIDE_FILE}".tmp.* 2>/dev/null
   [[ -n "${RELEASE_VERIFY_TMP:-}" ]] && rm -rf "${RELEASE_VERIFY_TMP}" 2>/dev/null
+  [[ -n "${OFFICIAL_IMAGE_LIST_FILE:-}" ]] && rm -f "${OFFICIAL_IMAGE_LIST_FILE}" 2>/dev/null
   [[ -n "${PENDING_MANIFEST_PAIR_DIR:-}" ]] && rm -rf "${PENDING_MANIFEST_PAIR_DIR}" 2>/dev/null
   [[ -n "${RELEASE_MANIFEST_PAIR_DIR:-}" ]] && rm -rf "${RELEASE_MANIFEST_PAIR_DIR}".tmp.* 2>/dev/null
   # A --upgrade that failed before its swap leaves a staged .env copy (and, if
