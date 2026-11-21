@@ -1,0 +1,106 @@
+name: Custom Branch CI
+
+# Purpose-built gates for our modified self-hosted Breeze distribution.
+# The unmodified upstream main is not a deployment or contribution target here.
+on:
+  pull_request:
+    branches: [custom]
+  push:
+    branches: [custom]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-safety:
+    name: Custom / Release safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check shell syntax and release integration
+        run: |
+          set -euo pipefail
+          bash -n scripts/guided-setup.sh
+          bash -n scripts/custom-release/list-verified-images.sh
+          bash -n scripts/custom-release/verify-image-set.sh
+          node --test scripts/custom-release/signed-custom-release.test.mjs
+          bash scripts/check-guided-setup-upgrade.sh
+          node --test scripts/release/verify-release-images.test.mjs scripts/release/release-image-consumers.test.mjs
+
+  app-tests:
+    name: Custom / Tests (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web, portal]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: '10.34.5'
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Application lint
+        if: matrix.app != 'portal'
+        env:
+          APP: ${{ matrix.app }}
+        run: pnpm --filter "@breeze/$APP" lint
+      - name: Unit tests
+        env:
+          APP: ${{ matrix.app }}
+        run: pnpm --filter "@breeze/$APP" exec vitest run
+
+  docker-build:
+    name: Custom / Docker build (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: api
+            dockerfile: docker/Dockerfile.api
+          - app: web
+            dockerfile: docker/Dockerfile.web
+          - app: portal
+            dockerfile: apps/portal/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      # Build the same API/Web Dockerfiles used by custom-release.yml.
+      # Portal is tested for compatibility but still published as the official
+      # image until the custom release workflow explicitly supports a portal.
+      - name: Build runtime image without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          build-args: |
+            APP_VERSION=0.0.0
+            PUBLIC_APP_VERSION=0.0.0
