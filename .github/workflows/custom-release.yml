@@ -1,0 +1,176 @@
+name: Signed custom Breeze server release
+
+# Manual, reviewed release. Uses a non-v* tag so the inherited upstream
+# full release pipeline cannot mistakenly start signing agent binaries.
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_release:
+        description: 'Exact official release (example: v0.129.0)'
+        required: true
+        type: string
+      custom_revision:
+        description: 'Positive integer revision (example: 1)'
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: custom-breeze-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, sign and publish server-only custom release
+    if: github.ref_name == 'custom' && github.repository == 'robert-audat/breeze'
+    runs-on: ubuntu-latest
+    environment: custom-release-signing
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout custom branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate custom release tooling
+        run: |
+          set -euo pipefail
+          bash -n scripts/guided-setup.sh
+          bash -n scripts/custom-release/list-verified-images.sh
+          bash -n scripts/custom-release/verify-image-set.sh
+          node --test scripts/custom-release/signed-custom-release.test.mjs
+          bash scripts/check-guided-setup-upgrade.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Validate release identity and ancestry
+        id: naming
+        env:
+          UPSTREAM: ${{ inputs.upstream_release }}
+          REVISION: ${{ inputs.custom_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$UPSTREAM" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 2
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]] || exit 2
+          git fetch --no-tags https://github.com/LanternOps/breeze.git "refs/tags/${UPSTREAM}:refs/tags/${UPSTREAM}"
+          git fetch --no-tags https://github.com/LanternOps/breeze.git \
+            main:refs/remotes/breeze-upstream/main
+          upstream_sha="$(git rev-parse "${UPSTREAM}^{commit}")"
+          branch_base="$(git merge-base "$GITHUB_SHA" refs/remotes/breeze-upstream/main)"
+          [[ "$branch_base" == "$upstream_sha" ]] || {
+            echo "::error::The custom branch diverged from official main at $branch_base, not at the requested release $upstream_sha. Refusing to mislabel post-release upstream commits as ${UPSTREAM}."
+            exit 1
+          }
+          CUSTOM_RELEASE="${UPSTREAM}-custom.${REVISION}"
+          echo "upstream=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          echo "custom=${CUSTOM_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=custom-${CUSTOM_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "base_version=${UPSTREAM#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify original release inventory
+        env:
+          UPSTREAM: ${{ steps.naming.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          mkdir -p official
+          base="https://github.com/LanternOps/breeze/releases/download/${UPSTREAM}"
+          curl -fsSL --retry 2 --max-time 60 --max-filesize 1048576 \
+            "$base/release-artifact-manifest.json" -o official/release-artifact-manifest.json
+          curl -fsSL --retry 2 --max-time 60 --max-filesize 4096 \
+            "$base/release-artifact-manifest.json.ed25519" -o official/release-artifact-manifest.json.ed25519
+          RELEASE_ARTIFACT_MANIFEST_PUBLIC_KEYS="$(sed -n 's/^RELEASE_ARTIFACT_MANIFEST_PUBLIC_KEYS=//p' .env.example | head -n 1)" \
+            bash scripts/release/verify-release-images.sh \
+              --manifest official/release-artifact-manifest.json \
+              --signature official/release-artifact-manifest.json.ed25519 \
+              --expected-repository LanternOps/breeze --expected-release "$UPSTREAM"
+
+      - name: Login to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish customized API
+        env:
+          BASE_VERSION: ${{ steps.naming.outputs.base_version }}
+          CUSTOM_RELEASE: ${{ steps.naming.outputs.custom }}
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
+            --file docker/Dockerfile.api --build-arg "APP_VERSION=${BASE_VERSION}" \
+            --metadata-file api-metadata.json \
+            --tag "ghcr.io/robert-audat/breeze/api:${CUSTOM_RELEASE}" .
+
+      - name: Build and publish customized Web
+        env:
+          BASE_VERSION: ${{ steps.naming.outputs.base_version }}
+          CUSTOM_RELEASE: ${{ steps.naming.outputs.custom }}
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
+            --file docker/Dockerfile.web --build-arg "PUBLIC_APP_VERSION=${BASE_VERSION}" \
+            --metadata-file web-metadata.json \
+            --tag "ghcr.io/robert-audat/breeze/web:${CUSTOM_RELEASE}" .
+
+      - name: Construct, sign and self-verify custom release inventory
+        env:
+          CUSTOM_RELEASE: ${{ steps.naming.outputs.custom }}
+          UPSTREAM: ${{ steps.naming.outputs.upstream }}
+          SIGNING_KEY_PEM: ${{ secrets.CUSTOM_RELEASE_SIGNING_KEY_PEM }}
+          SIGNING_PUBLIC_KEY_B64: ${{ vars.CUSTOM_RELEASE_PUBLIC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SIGNING_KEY_PEM" && -n "$SIGNING_PUBLIC_KEY_B64" ]] || {
+            echo '::error::Missing signing environment secret or public key variable.'; exit 1;
+          }
+          umask 077
+          printf '%s' "$SIGNING_KEY_PEM" > "$RUNNER_TEMP/custom-ed25519-key.pem"
+          node --input-type=module <<'NODE' > custom-image-refs.env
+          import { readFileSync } from 'node:fs';
+          for (const name of ['api', 'web']) {
+            const metadata = JSON.parse(readFileSync(`${name}-metadata.json`, 'utf8'));
+            const digest = metadata['containerimage.digest'];
+            if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`Invalid ${name} digest`);
+            console.log(`${name.toUpperCase()}_REF=ghcr.io/robert-audat/breeze/${name}@${digest}`);
+          }
+          NODE
+          # This file contains only validated image refs and no secrets.
+          # shellcheck source=/dev/null
+          source custom-image-refs.env
+          node scripts/custom-release/create-manifest.mjs \
+            --release "$CUSTOM_RELEASE" --upstream "$UPSTREAM" \
+            --repository "$GITHUB_REPOSITORY" --source-commit "$GITHUB_SHA" \
+            --official-manifest official/release-artifact-manifest.json \
+            --signing-key-file "$RUNNER_TEMP/custom-ed25519-key.pem" \
+            --output-dir release-assets --api-ref "$API_REF" --web-ref "$WEB_REF"
+          rm -f "$RUNNER_TEMP/custom-ed25519-key.pem"
+          RELEASE_ARTIFACT_MANIFEST_PUBLIC_KEYS="$SIGNING_PUBLIC_KEY_B64" \
+            bash scripts/release/verify-release-images.sh \
+              --manifest release-assets/release-artifact-manifest.json \
+              --signature release-assets/release-artifact-manifest.json.ed25519 \
+              --expected-repository "$GITHUB_REPOSITORY" --expected-release "$CUSTOM_RELEASE"
+          bash scripts/custom-release/list-verified-images.sh official/release-artifact-manifest.json > official-images.tsv
+          bash scripts/custom-release/list-verified-images.sh release-assets/release-artifact-manifest.json > custom-images.tsv
+          bash scripts/custom-release/verify-image-set.sh official-images.tsv custom-images.tsv "$GITHUB_REPOSITORY"
+
+      - name: Publish custom GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: ${{ steps.naming.outputs.upstream }}
+          CUSTOM_RELEASE: ${{ steps.naming.outputs.custom }}
+          RELEASE_TAG: ${{ steps.naming.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists; revisions are immutable."
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" release-assets/release-artifact-manifest.json \
+            release-assets/release-artifact-manifest.json.ed25519 \
+            --target "$GITHUB_SHA" --title "$CUSTOM_RELEASE" \
+            --notes "Custom server images built from $GITHUB_SHA, based on official $UPSTREAM. Original signed binaries and M365 executor images retained."
