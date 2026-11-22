@@ -19,3 +19,5 @@ In short:
 
 Do not publish a `custom-v*` tag before restricting initial tag creation
 to a trusted release publisher and finalizing the signing environment.
+
+Initial custom workflow validation: 2026-11-22.
