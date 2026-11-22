@@ -2,7 +2,7 @@ name: Confidential Scan
 
 on:
   push:
-    branches: [custom]
+    branches: [main]
 
 permissions:
   contents: read
