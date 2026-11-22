@@ -1,4 +1,4 @@
-name: Custom Branch CI
+name: CUSTOM / Branch CI
 
 # Purpose-built gates for our modified self-hosted Breeze distribution.
 # The unmodified upstream main is not a deployment or contribution target here.
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-safety:
-    name: Custom / Release safety
+    name: CUSTOM / Release safety
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -48,7 +48,7 @@ jobs:
         run: node scripts/custom-release/check-workflow-drift.mjs
 
   app-tests:
-    name: Custom / Tests (${{ matrix.app }})
+    name: CUSTOM / Tests (${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -82,7 +82,7 @@ jobs:
         run: pnpm --filter "@breeze/$APP" exec vitest run
 
   docker-build:
-    name: Custom / Docker build (${{ matrix.app }})
+    name: CUSTOM / Docker build (${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
