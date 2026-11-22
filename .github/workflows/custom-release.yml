@@ -1,4 +1,4 @@
-name: Signed custom Breeze server release
+name: CUSTOM / Signed Breeze Release
 
 # Tag-triggered release from the reviewed custom branch. The custom-v*
 # namespace deliberately does not match upstream's v* full/agent release jobs.
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate exact release tag and source
+    name: CUSTOM / Validate tagged source
     if: startsWith(github.ref, 'refs/tags/custom-v') && github.repository == 'robert-audat/breeze'
     runs-on: ubuntu-latest
     permissions:
@@ -101,7 +101,7 @@ jobs:
           done
 
   publish:
-    name: Build, sign and publish server-only custom release
+    name: CUSTOM / Publish signed server images
     needs: validate
     runs-on: ubuntu-latest
     environment: custom-release-signing
