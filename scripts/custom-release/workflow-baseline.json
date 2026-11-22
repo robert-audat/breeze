@@ -1,0 +1,12 @@
+{
+  "upstreamRelease": "v0.130.0",
+  "note": "Blob hashes of inherited workflows reviewed at upstream stable release. Update after reviewing upstream changes; this is a drift warning, not a bypass of CI.",
+  "blobs": {
+    ".github/workflows/codeql.yml": "d0c1ca956cf379d4cd31f93972359b9c409ac025",
+    ".github/workflows/secret-scan.yml": "e25e7920b205e99807f074fa37025215262f8c72",
+    ".github/workflows/confidential-scan.yml": "a829d696012444b6203a42d549cb6fce7d12f32c",
+    ".github/workflows/ci-smoke-binary-source-github.yml": "45da40ad1eb6ee2642d06d78bbf07357eea47a34",
+    ".github/workflows/ci-smoke-binary-source-local.yml": "4e107390b21aacc68c454d4bccc671dbb2e3b876",
+    ".github/workflows/windows-installer-bootstrap.yml": "b07c4a1c60b8a2bf30b5b8633f091860a5c7e6cb"
+  }
+}
