@@ -17,7 +17,6 @@ name: smoke-binary-source-github
 
 on:
   pull_request:
-    branches: [custom]
     paths:
       - "apps/api/src/services/binarySync.ts"
       - "apps/api/src/services/releaseArtifactManifest.ts"
@@ -27,7 +26,7 @@ on:
       - "apps/api/migrations/**"
       - ".github/workflows/ci-smoke-binary-source-github.yml"
   push:
-    branches: [custom]
+    branches: [main]
 
 env:
   PNPM_VERSION: '10.34.5'

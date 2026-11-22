@@ -7,9 +7,9 @@ separately.
 
 | Identity | Example | Meaning |
 | --- | --- | --- |
-| `BREEZE_VERSION` | `0.129.0` | Official Breeze release baseline; used by runtime, agents and migrations |
-| `BREEZE_CUSTOM_RELEASE_VERSION` | `v0.129.0-custom.1` | Signed fork revision of custom server code |
-| GitHub Release asset tag | `custom-v0.129.0-custom.1` | Non-`v*` tag to avoid the upstream full agent release workflow |
+| `BREEZE_VERSION` | `0.130.0` | Official Breeze release baseline; used by runtime, agents and migrations |
+| `BREEZE_CUSTOM_RELEASE_VERSION` | `v0.130.0-custom.1` | Signed fork revision of custom server code |
+| GitHub Release asset tag | `custom-v0.130.0-custom.1` | Non-`v*` tag to avoid the upstream full agent release workflow |
 | `BREEZE_CUSTOM_RELEASE_REPOSITORY` | `robert-audat/breeze` | Repository publishing the custom release |
 | `BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS` | Base64 Ed25519 public key | Locally pinned fork signing trust anchor |
 
@@ -58,12 +58,24 @@ Create the GitHub Actions **Environment** `custom-release-signing` in
 - Variable `CUSTOM_RELEASE_PUBLIC_KEY_B64`: the base64-encoded raw public key
   printed above.
 
+The validation job also requires the exact tagged commit to have successful
+`CUSTOM / Required Checks`, `CUSTOM / Gitleaks` and
+`CUSTOM / Dependency audit` status checks. All three must complete on
+the protected `custom` branch **before** the release tag is pushed.
+Missing, pending or failed checks prevent the publish job from accessing
+the signing environment.
+
 The workflow runs on a `custom-v*` **tag**, not on a branch event. Under the
 environment's deployment branch/tag restrictions, select **Selected branches and
 tags**, then add an allowed **tag** pattern `custom-v*` (not just branch
-`custom`). Add required reviewers if available. A separate GitHub **tag
-ruleset** must protect creation and updating of `custom-v*` tags; an
-environment selector alone does not guarantee the tag comes from reviewed code.
+`custom`). Add required reviewers if available. A separate GitHub **tag ruleset** must restrict initial creation of
+`custom-v*` tags to a narrowly authorized publisher/bypass actor, and
+restrict updates and deletions. Until creation restrictions are configured,
+an authorized repository writer may create a tag at unreviewed workflow
+code; the tagged workflow could then be modified to bypass its own checks.
+Environment protection (ideally a second independent reviewer) mitigates
+this additional trust risk. Do not publish a signed release until both
+protections are established.
 Protect `custom` with PR, review, and check requirements. Only create tags
 from reviewed `custom` commits, and never expose signing secrets to
 untrusted PR workflows. Do not commit private keys.
@@ -94,8 +106,8 @@ fork's default branch. Do not use the inherited `v*` release workflows.
    git fetch origin
    git switch custom
    git pull --ff-only origin custom
-   git tag -a custom-v0.129.0-custom.1 -m "Custom Breeze v0.129.0-custom.1"
-   git push origin refs/tags/custom-v0.129.0-custom.1
+   git tag -a custom-v0.130.0-custom.1 -m "Custom Breeze v0.130.0-custom.1"
+   git push origin refs/tags/custom-v0.130.0-custom.1
    ```
 
    Replace the version above with a **validated** official baseline and the
@@ -121,11 +133,13 @@ manifest records the custom commit SHA and hashes the official image inventory
 to bind both release identities. If needed later, the manifest builder can
 also support a separately built, verified custom Portal image.
 
-**Current fork caution (November 21, 2026):** upstream's latest published
-release was `v0.129.0`, while this fork's `custom` branch already includes
-newer upstream commits. The release workflow **must refuse**
-`custom-v0.129.0-custom.1` from that branch. Establish the exact official
-release baseline before tagging; do not tag the current branch as 0.129.0.
+**Verified baseline (November 22, 2026):** the official v0.130.0 tag
+points to `e8ba47ef00660dd0021e00790b3d8ba799085c8a`, exactly the
+upstream commit where this fork's `custom` branch diverges. Confirm again
+with `git merge-base origin/custom upstream/main` before tagging. Do not
+merge unreleased upstream commits into the custom branch before publishing
+this release. The official v0.130.0 release has signed manifest assets,
+but verification must still pass in the release workflow.
 
 **Inherited workflows:** this fork also contains upstream `v*` release
 workflows. Keep the upstream release/promotion workflows disabled in the fork,
@@ -142,11 +156,11 @@ one extra flag:
 git clone https://github.com/robert-audat/breeze.git /opt/breeze-source
 cd /opt/breeze-source
 git switch custom
-export BREEZE_SETUP_VERSION=0.129.0
+export BREEZE_SETUP_VERSION=0.130.0
 export BREEZE_CUSTOM_RELEASE_REPOSITORY=robert-audat/breeze
 export BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS='<YOUR_CUSTOM_PUBLIC_KEY_BASE64>'
 bash scripts/guided-setup.sh --work-dir /opt/breeze \
-  --custom-release v0.129.0-custom.1
+  --custom-release v0.130.0-custom.1
 ```
 
 This requires a **published, signed** matching custom release, and is not a
@@ -174,8 +188,8 @@ export BREEZE_CUSTOM_RELEASE_REPOSITORY='robert-audat/breeze'
 sudo --preserve-env=BREEZE_CUSTOM_RELEASE_PUBLIC_KEYS,BREEZE_CUSTOM_RELEASE_REPOSITORY \
   bash scripts/guided-setup.sh \
     --work-dir /opt/breeze \
-    --upgrade v0.129.0 \
-    --custom-release v0.129.0-custom.1 \
+    --upgrade v0.130.0 \
+    --custom-release v0.130.0-custom.1 \
     --no-up -y
 
 # Review upgraded .env and release notes before the actual restart.

@@ -1,4 +1,4 @@
-name: Custom Branch CI
+name: CUSTOM / Branch CI
 
 # Purpose-built gates for our modified self-hosted Breeze distribution.
 # The unmodified upstream main is not a deployment or contribution target here.
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release-safety:
-    name: Custom / Release safety
+    name: CUSTOM / Release safety
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -35,8 +35,20 @@ jobs:
           bash scripts/check-guided-setup-upgrade.sh
           node --test scripts/release/verify-release-images.test.mjs scripts/release/release-image-consumers.test.mjs
 
+  workflow-drift:
+    name: CUSTOM / Workflow drift advisory
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Compare upstream workflow files against reviewed baseline
+        run: node scripts/custom-release/check-workflow-drift.mjs
+
   app-tests:
-    name: Custom / Tests (${{ matrix.app }})
+    name: CUSTOM / Tests (${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -70,7 +82,7 @@ jobs:
         run: pnpm --filter "@breeze/$APP" exec vitest run
 
   docker-build:
-    name: Custom / Docker build (${{ matrix.app }})
+    name: CUSTOM / Docker build (${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -104,3 +116,23 @@ jobs:
           build-args: |
             APP_VERSION=0.0.0
             PUBLIC_APP_VERSION=0.0.0
+
+  required-checks:
+    name: CUSTOM / Required Checks
+    if: ${{ always() }}
+    needs: [release-safety, app-tests, docker-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful test and image build matrices
+        env:
+          RELEASE_SAFETY: ${{ needs.release-safety.result }}
+          APP_TESTS: ${{ needs.app-tests.result }}
+          DOCKER_BUILD: ${{ needs.docker-build.result }}
+        run: |
+          set -euo pipefail
+          for check in RELEASE_SAFETY APP_TESTS DOCKER_BUILD; do
+            result="${!check}"
+            echo "$check: $result"
+            [[ "$result" == success ]] || exit 1
+          done

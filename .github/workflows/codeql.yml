@@ -2,9 +2,9 @@ name: CodeQL SAST
 
 on:
   push:
-    branches: [custom]
+    branches: [main]
   pull_request:
-    branches: [custom]
+    branches: [main]
     # Not a required check (`CI Success` is), so a docs-only PR can skip it
     # without starving the merge queue. See ci.yml for why CI itself cannot.
     paths-ignore:
@@ -13,8 +13,10 @@ on:
       - docs/**
       - apps/docs/**
       - internal/**
-  # No cron here: scheduled GitHub Actions workflows always run on default
-  # branch (main), not the custom distribution branch.
+  schedule:
+    # Weekly re-scan of main picks up new queries shipped in the CodeQL
+    # bundle even when nothing landed that day.
+    - cron: '17 6 * * 1'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
