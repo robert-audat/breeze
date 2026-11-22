@@ -135,10 +135,45 @@ jobs:
             APP_VERSION=0.0.0
             PUBLIC_APP_VERSION=0.0.0
 
+  # Scan the exact Dockerfiles used for our published API and Web images.
+  # Unlike upstream security.yml (main-only), this runs for custom PRs/pushes.
+  image-scan:
+    name: CUSTOM / Trivy image scan (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { app: api, dockerfile: docker/Dockerfile.api }
+          - { app: web, dockerfile: docker/Dockerfile.web }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build published image Dockerfile for scanning
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE: ${{ matrix.app }}
+        run: |
+          docker build -f "$DOCKERFILE" --build-arg APP_VERSION=0.0.0 \
+            --build-arg PUBLIC_APP_VERSION=0.0.0 -t "breeze-custom-${IMAGE}:security-scan" .
+      - name: Restore Trivy DB cache
+        uses: ./.github/actions/restore-trivy-db
+      - name: Scan image for HIGH/CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'breeze-custom-${{ matrix.app }}:security-scan'
+          severity: 'HIGH,CRITICAL'
+          format: 'table'
+          exit-code: '1'
+          cache: 'false'
+
   required-checks:
     name: CUSTOM / Required Checks
     if: ${{ always() }}
-    needs: [release-safety, app-tests, docker-build]
+    needs: [release-safety, app-tests, docker-build, image-scan]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -147,9 +182,10 @@ jobs:
           RELEASE_SAFETY: ${{ needs.release-safety.result }}
           APP_TESTS: ${{ needs.app-tests.result }}
           DOCKER_BUILD: ${{ needs.docker-build.result }}
+          IMAGE_SCAN: ${{ needs.image-scan.result }}
         run: |
           set -euo pipefail
-          for check in RELEASE_SAFETY APP_TESTS DOCKER_BUILD; do
+          for check in RELEASE_SAFETY APP_TESTS DOCKER_BUILD IMAGE_SCAN; do
             result="${!check}"
             echo "$check: $result"
             [[ "$result" == success ]] || exit 1
