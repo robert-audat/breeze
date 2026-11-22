@@ -48,13 +48,21 @@ jobs:
         run: node scripts/custom-release/check-workflow-drift.mjs
 
   app-tests:
-    name: CUSTOM / Tests (${{ matrix.app }})
+    name: CUSTOM / Tests (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        app: [api, web, portal]
+        include:
+          # Native Vitest sharding partitions API test files across parallel jobs.
+          # Each shard runs the same API lint and exactly one test-file partition.
+          - { app: api, label: "api shard 1/4", shard: "1/4" }
+          - { app: api, label: "api shard 2/4", shard: "2/4" }
+          - { app: api, label: "api shard 3/4", shard: "3/4" }
+          - { app: api, label: "api shard 4/4", shard: "4/4" }
+          - { app: web, label: web, shard: "" }
+          - { app: portal, label: portal, shard: "" }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -79,7 +87,13 @@ jobs:
       - name: Unit tests
         env:
           APP: ${{ matrix.app }}
-        run: pnpm --filter "@breeze/$APP" exec vitest run
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ -n "$SHARD" ]; then
+            pnpm --filter "@breeze/$APP" exec vitest run --shard="$SHARD"
+          else
+            pnpm --filter "@breeze/$APP" exec vitest run
+          fi
 
   docker-build:
     name: CUSTOM / Docker build (${{ matrix.app }})
