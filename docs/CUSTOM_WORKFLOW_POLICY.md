@@ -156,3 +156,38 @@ All server-only releases retain original signed binaries and original M365
 executor image references. Self-signed agents/viewers/helpers use a separate
 binary signing trust and distribution process. Portal and custom M365 executor
 publishing need additional workflows/manifest policy before use in production.
+
+
+## Advisory-only upstream compatibility review
+
+The fork also runs **CUSTOM / Upstream Compatibility Review** from
+`.github/workflows/custom-upstream-review.yml` on every pull request targeting
+`custom` and every push to `custom`. The review is informational only:
+
+- The workflow is **not** a required status check and is **not** included in
+  `CUSTOM / Required Checks`. Upstream differences never block a merge.
+- It compares the last manually reviewed upstream commit in
+  `scripts/custom-release/workflow-baseline.json` against the synchronized
+  fork `main` tip, and checks whether the changed files are in the PR checkout.
+- It reports upstream changes to workflows, shared `.github/actions/**`,
+  app and endpoint tests, endpoint implementations, test configuration,
+  dependencies, and build/security/release inputs.
+- It generates original-to-CUSTOM workflow comparisons for each configured
+  mapping. Those workflows intentionally differ; a textual difference alone
+  is not evidence of a missing change.
+- Its Actions summary and downloadable artifact include a file inventory,
+  upstream patch, pairwise workflow diffs, and machine-readable JSON.
+  The artifact is retained for 30 days.
+
+Implementation: `scripts/custom-release/review-upstream-drift.mjs`.
+The earlier `CUSTOM / Workflow drift advisory` remains in place.
+
+**Upstream update procedure:** Sync `main`, prepare an integration branch
+from `custom`, merge the selected upstream release into that branch, and open
+a PR targeting `custom`. Read the advisory report before merging, adapt
+custom workflows if needed, and run the review again after the merge. A sync
+of `main` alone will not trigger this custom-branch-only workflow.
+
+Only advance `upstreamCommit`, `upstreamRelease`, and the reviewed hash entries
+after the new upstream version has been consciously reviewed and integrated.
+Never update the baseline automatically merely to clear drift warnings.
