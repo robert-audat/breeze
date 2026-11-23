@@ -141,34 +141,65 @@ jobs:
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
+      # Buildx publishing via the action is discoverable by the upstream
+      # Dockerfile-to-Trivy-coverage guard. The exact pushed digest is scanned
+      # before it is placed in a signed custom release inventory.
       - name: Build and publish customized API
-        env:
-          BASE_VERSION: ${{ needs.validate.outputs.base_version }}
-          CUSTOM_RELEASE: ${{ needs.validate.outputs.custom }}
-        run: |
-          set -euo pipefail
-          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
-            --file docker/Dockerfile.api --build-arg "APP_VERSION=${BASE_VERSION}" \
-            --metadata-file api-metadata.json \
-            --tag "ghcr.io/robert-audat/breeze/api:${CUSTOM_RELEASE}" .
+        id: build_api
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/Dockerfile.api
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            APP_VERSION=${{ needs.validate.outputs.base_version }}
+          tags: ghcr.io/robert-audat/breeze/api:${{ needs.validate.outputs.custom }}
 
       - name: Build and publish customized Web
-        env:
-          BASE_VERSION: ${{ needs.validate.outputs.base_version }}
-          CUSTOM_RELEASE: ${{ needs.validate.outputs.custom }}
-        run: |
-          set -euo pipefail
-          docker buildx build --platform linux/amd64 --push --provenance=mode=max --sbom=true \
-            --file docker/Dockerfile.web --build-arg "PUBLIC_APP_VERSION=${BASE_VERSION}" \
-            --metadata-file web-metadata.json \
-            --tag "ghcr.io/robert-audat/breeze/web:${CUSTOM_RELEASE}" .
+        id: build_web
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            PUBLIC_APP_VERSION=${{ needs.validate.outputs.base_version }}
+          tags: ghcr.io/robert-audat/breeze/web:${{ needs.validate.outputs.custom }}
 
+      - name: Restore Trivy DB cache
+        uses: ./.github/actions/restore-trivy-db
+
+      - name: Scan published API digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/robert-audat/breeze/api@${{ steps.build_api.outputs.digest }}
+          severity: 'HIGH,CRITICAL'
+          format: 'table'
+          exit-code: '1'
+          cache: 'false'
+
+      - name: Scan published Web digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/robert-audat/breeze/web@${{ steps.build_web.outputs.digest }}
+          severity: 'HIGH,CRITICAL'
+          format: 'table'
+          exit-code: '1'
+          cache: 'false'
       - name: Construct, sign and self-verify custom release inventory
         env:
           CUSTOM_RELEASE: ${{ needs.validate.outputs.custom }}
           UPSTREAM: ${{ needs.validate.outputs.upstream }}
           SIGNING_KEY_PEM: ${{ secrets.CUSTOM_RELEASE_SIGNING_KEY_PEM }}
           SIGNING_PUBLIC_KEY_B64: ${{ vars.CUSTOM_RELEASE_PUBLIC_KEY_B64 }}
+          API_DIGEST: ${{ steps.build_api.outputs.digest }}
+          WEB_DIGEST: ${{ steps.build_web.outputs.digest }}
         run: |
           set -euo pipefail
           [[ -n "$SIGNING_KEY_PEM" && -n "$SIGNING_PUBLIC_KEY_B64" ]] || {
@@ -177,11 +208,8 @@ jobs:
           umask 077
           printf '%s' "$SIGNING_KEY_PEM" > "$RUNNER_TEMP/custom-ed25519-key.pem"
           node --input-type=module <<'NODE' > custom-image-refs.env
-          import { readFileSync } from 'node:fs';
-          for (const name of ['api', 'web']) {
-            const metadata = JSON.parse(readFileSync(`${name}-metadata.json`, 'utf8'));
-            const digest = metadata['containerimage.digest'];
-            if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`Invalid ${name} digest`);
+          for (const [name, digest] of [['api', process.env.API_DIGEST], ['web', process.env.WEB_DIGEST]]) {
+            if (!/^sha256:[0-9a-f]{64}$/.test(digest ?? '')) throw new Error(`Invalid ${name} digest`);
             console.log(`${name.toUpperCase()}_REF=ghcr.io/robert-audat/breeze/${name}@${digest}`);
           }
           NODE

@@ -477,6 +477,27 @@ describe('Trivy image scan covers the images we publish', () => {
     }
   });
 
+  it('custom release scans the exact pushed API and Web digests before signing', () => {
+    const steps = readWorkflow('.github/workflows/custom-release.yml').jobs?.publish?.steps ?? [];
+    const signIndex = steps.findIndex((step) =>
+      typeof step.run === 'string' && step.run.includes('scripts/custom-release/create-manifest.mjs'),
+    );
+    expect(signIndex).toBeGreaterThan(-1);
+    for (const [name, buildId] of [['api', 'build_api'], ['web', 'build_web']] as const) {
+      const buildIndex = steps.findIndex((step) =>
+        step.uses?.startsWith(BUILD_PUSH_ACTION) && step.with?.file === `docker/Dockerfile.${name}`
+      );
+      const scanIndex = steps.findIndex((step) =>
+        step.uses?.startsWith(TRIVY_ACTION) &&
+        String(step.with?.['image-ref']).includes(`steps.${buildId}.outputs.digest`),
+      );
+      expect(buildIndex, `${name} must publish through build-push-action`).toBeGreaterThan(-1);
+      expect(scanIndex, `${name} pushed digest must have a Trivy scan`).toBeGreaterThan(buildIndex);
+      expect(signIndex, `${name} must be scanned before signing`).toBeGreaterThan(scanIndex);
+      expect(steps[scanIndex].with?.severity).toBe('HIGH,CRITICAL');
+      expect(String(steps[scanIndex].with?.['exit-code'])).toBe('1');
+    }
+  });
   it('leaves no Dockerfile silently unclassified', () => {
     // Anti-rot snapshot over every tracked Dockerfile, not just the published
     // ones — it is the backstop for a derivation that shrinks. A new image, or
@@ -507,11 +528,10 @@ describe('Trivy image scan covers the images we publish', () => {
       'apps/m365-graph-read-executor/Dockerfile': 'published + scanned',
       'apps/portal/Dockerfile': 'published + scanned',
       'apps/web/Dockerfile': 'published + scanned',
-      // Built from source by ci.yml's smoke test and the local-build compose
-      // mode; see `the compose variants are still built from source` below,
-      // which derives that rather than trusting this comment.
-      'docker/Dockerfile.api': 'not published, scanned anyway',
-      'docker/Dockerfile.web': 'not published, scanned anyway',
+      // Custom server release publishes these compose Dockerfiles, and CI also
+      // builds/scans them. The custom image-scan job is required to pass.
+      'docker/Dockerfile.api': 'published + scanned',
+      'docker/Dockerfile.web': 'published + scanned',
       // Never published — Vercel builds it directly from source as a custom
       // image, not via a build-push-action publish step this guard can see.
       // Executes model-authored code, so it is scanned anyway.
@@ -526,9 +546,8 @@ describe('Trivy image scan covers the images we publish', () => {
   });
 
   it('the compose variants are still built from source somewhere', () => {
-    // The snapshot keeps docker/Dockerfile.api|web scanned even though release
-    // never pushes them, on the grounds that CI's smoke test and the
-    // local-build compose mode build them. Derive that instead of asserting it
+    // The custom release now publishes docker/Dockerfile.api|web, and the
+    // local-build compose mode also builds them. Derive that instead of asserting it
     // in prose, so the rationale cannot rot while the entries stay.
     const CI_OVERRIDE = 'docker-compose.override.yml.ci';
     const compose = [CI_OVERRIDE, 'docker-compose.override.yml.local-build']
@@ -603,6 +622,7 @@ describe('Trivy image scan covers the images we publish', () => {
     }
 
     expect(coverage).toEqual({
+      '.github/workflows/custom-release.yml:publish': 'has a trivy-action step',
       '.github/workflows/release.yml:build-binaries-image': 'NO trivy-action step',
       '.github/workflows/release.yml:build-docker-api': 'NO trivy-action step',
       '.github/workflows/release.yml:build-docker-m365-communications-executor':
